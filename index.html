@@ -3,8 +3,6 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="icon" type="image/PNG" href="Claude.PNG">
-    <link rel="apple-touch-icon" href="Claude.PNG">
     <title>Claude Chat</title>
     <meta name="description" content="Interface de chat avec Claude AI" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -1084,7 +1082,8 @@
           const b64 = await readFileAsBase64(file);
           const mimeMap = { jpg:"image/jpeg", jpeg:"image/jpeg", png:"image/png", gif:"image/gif", webp:"image/webp" };
           const mediaType = mimeMap[ext] || "image/jpeg";
-          const previewUrl = URL.createObjectURL(file);
+          // Data URL persists without revocation — safe for history and localStorage display
+          const previewUrl = `data:${mediaType};base64,${b64}`;
           return { type: "image", name: file.name, mediaType, data: b64, previewUrl };
         }
         if (isPdf) {
@@ -1116,8 +1115,6 @@
         }).join("");
       }
       function removeAttachment(i) {
-        const a = state.pendingAttachments[i];
-        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
         state.pendingAttachments.splice(i, 1);
         renderAttachmentPreviews();
         updateSendBtn();
@@ -1181,7 +1178,7 @@
           images: attachments.filter(a => a.type === "image").map(a => a.previewUrl),
           files: attachments.filter(a => a.type === "file").map(a => a.name),
         };
-        // Build raw content for API re-use
+        // Build raw content for API re-use in future turns
         if (attachments.length > 0) {
           const rawBlocks = [];
           for (const a of attachments) {
@@ -1191,6 +1188,10 @@
           if (userText) rawBlocks.push({ type: "text", text: userText });
           userMsg._rawContent = rawBlocks;
         }
+
+        // Build API messages BEFORE pushing to history — prevents the message from
+        // appearing twice in the array Claude receives
+        const apiMessages = buildApiMessages(conv, userText, attachments);
 
         conv.messages.push(userMsg);
 
@@ -1219,7 +1220,6 @@
         const streamEl = appendThinking();
 
         try {
-          const apiMessages = buildApiMessages(conv, userText, attachments);
           const response = await fetch(state.apiUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1255,19 +1255,17 @@
             }
           }
 
+          // Capture BEFORE finalizing — finalizeStreamingContent resets streamBuffer to ""
+          const fullText = streamBuffer;
           finalizeStreamingContent(streamEl);
-          const assistantMsg = { role: "assistant", text: streamBuffer !== "" ? streamBuffer : streamEl.innerText };
-          // streamBuffer is reset in finalizeStreamingContent, so use innerText
-          const finalText = streamEl.innerText;
-          conv.messages.push({ role: "assistant", text: finalText });
+          conv.messages.push({ role: "assistant", text: fullText });
           saveConversations();
-          streamBuffer = "";
 
         } catch (err) {
           if (err.name === "AbortError") {
+            const fullText = streamBuffer;
             finalizeStreamingContent(streamEl);
-            const finalText = streamEl.innerText || "[Génération interrompue]";
-            conv.messages.push({ role: "assistant", text: finalText });
+            conv.messages.push({ role: "assistant", text: fullText || "[Génération interrompue]" });
             saveConversations();
           } else {
             setApiStatus(false);
@@ -1278,8 +1276,6 @@
           state.streaming = false;
           state.abortController = null;
           updateSendBtnStreaming(false);
-          // Clean up preview URLs
-          for (const a of attachments) if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
         }
       }
 
